@@ -345,17 +345,15 @@ class InputReader(object):
 
     # Prefetch data from files.
     def _prefetch_dataset(filename):
-      dataset = tf.data.TFRecordDataset(filename).prefetch(1)
+      dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP').prefetch(tf.data.experimental.AUTOTUNE)
       return dataset
 
-    dataset = dataset.apply(
-        tf.data.experimental.parallel_interleave(
-            _prefetch_dataset, cycle_length=32, sloppy=self._is_training))
+    dataset = dataset.interleave(_prefetch_dataset, cycle_length=tf.data.experimental.AUTOTUNE)
     if self._is_training:
       dataset = dataset.shuffle(64)
 
     # Parse the fetched records to input tensors for model function.
-    dataset = dataset.map(_dataset_parser, num_parallel_calls=64)
+    dataset = dataset.map(_dataset_parser, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     dataset = dataset.prefetch(batch_size)
     dataset = dataset.batch(batch_size, drop_remainder=True)
 

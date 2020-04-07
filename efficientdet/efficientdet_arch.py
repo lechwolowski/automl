@@ -32,7 +32,7 @@ import hparams_config
 import utils
 from backbone import backbone_factory
 from backbone import efficientnet_builder
-
+from tensorflow.python.tf2 import enabled
 
 ################################################################################
 def nearest_upsampling(data, scale):
@@ -338,6 +338,7 @@ def build_backbone(features, config):
         'backbone model {} is not supported.'.format(backbone_name))
   return {2: u2, 3: u3, 4: u4, 5: u5}
 
+vars_list = []
 
 def build_feature_network(features, config):
   """Build FPN input features.
@@ -378,9 +379,18 @@ def build_feature_network(features, config):
       min_level=config.min_level,
       max_level=config.max_level)
 
+  init = not vars_list
   with tf.variable_scope('fpn_cells'):
     for rep in range(config.fpn_cell_repeats):
       with tf.variable_scope('cell_{}'.format(rep)):
+        if init:
+            vars = []
+            fpn_config = config.fpn_config or get_fpn_config(config.fpn_name)
+            for fnode in fpn_config.nodes:
+                vars.append([
+                    tf.Variable(1.0, name='WSM') for _ in range(len(fnode['inputs_offsets']))
+                ])
+            vars_list.append(vars)
         logging.info('building cell %d', rep)
         new_feats = build_bifpn_layer(
             feats=feats,
@@ -396,7 +406,8 @@ def build_feature_network(features, config):
             conv_after_downsample=config.conv_after_downsample,
             use_native_resize_op=config.use_native_resize_op,
             conv_bn_relu_pattern=config.conv_bn_relu_pattern,
-            pooling_type=config.pooling_type)
+            pooling_type=config.pooling_type,
+            vars=vars_list[rep])
 
         feats = [
             new_feats[level]
@@ -454,11 +465,12 @@ def build_bifpn_layer(
     feats, fpn_name, fpn_config, is_training, input_size,
     fpn_num_filters, min_level, max_level, separable_conv,
     apply_bn_for_resampling, conv_after_downsample,
-    use_native_resize_op, conv_bn_relu_pattern, pooling_type):
+    use_native_resize_op, conv_bn_relu_pattern, pooling_type, vars):
   """Builds a feature pyramid given previous feature pyramid and config."""
   config = fpn_config or get_fpn_config(fpn_name)
 
   num_output_connections = [0 for _ in feats]
+
   for i, fnode in enumerate(config.nodes):
     with tf.variable_scope('fnode{}'.format(i)):
       logging.info('fnode %d : %s', i, fnode)
@@ -486,8 +498,8 @@ def build_bifpn_layer(
         new_node = tf.reduce_sum(tf.multiply(nodes, normalized_weights), -1)
       elif config.weight_method == 'fastattn':
         edge_weights = [
-            tf.nn.relu(tf.cast(tf.Variable(1.0, name='WSM'), dtype=dtype))
-            for _ in range(len(fnode['inputs_offsets']))
+            tf.nn.relu(tf.cast(var, dtype=dtype))
+            for var in vars[i]
         ]
         weights_sum = tf.add_n(edge_weights)
         nodes = [nodes[i] * edge_weights[i] / (weights_sum + 0.0001)
@@ -551,17 +563,20 @@ def efficientdet(features, model_name=None, config=None, **kwargs):
 
   # build backbone features.
   features = build_backbone(features, config)
-  logging.info('backbone params/flops = {:.6f}M, {:.9f}B'.format(
-      *utils.num_params_flops()))
+  if not enabled():
+      logging.info('backbone params/flops = {:.6f}M, {:.9f}B'.format(
+          *utils.num_params_flops()))
 
   # build feature network.
   fpn_feats = build_feature_network(features, config)
-  logging.info('backbone+fpn params/flops = {:.6f}M, {:.9f}B'.format(
-      *utils.num_params_flops()))
+  if not enabled():
+      logging.info('backbone+fpn params/flops = {:.6f}M, {:.9f}B'.format(
+          *utils.num_params_flops()))
 
   # build class and box predictions.
   class_outputs, box_outputs = build_class_and_box_outputs(fpn_feats, config)
-  logging.info('backbone+fpn+box params/flops = {:.6f}M, {:.9f}B'.format(
-      *utils.num_params_flops()))
+  if not enabled():
+      logging.info('backbone+fpn+box params/flops = {:.6f}M, {:.9f}B'.format(
+          *utils.num_params_flops()))
 
   return class_outputs, box_outputs

@@ -72,7 +72,11 @@ class BoxList(object):
       Number of boxes held in collection (integer) or None if this is not
         inferable at graph construction time.
     """
-    return self.data['boxes'].get_shape()[0].value
+    batch_size = self.data['boxes'].get_shape()[0]
+    if isinstance(batch_size, tf.Dimension):
+      return batch_size.value
+    else:
+      return batch_size
 
   def get_all_fields(self):
     """Returns all fields."""
