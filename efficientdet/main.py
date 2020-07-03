@@ -211,7 +211,7 @@ def main(_):
     num_cores_per_replica = None
     input_partition_dims = None
     num_shards = FLAGS.num_cores
-
+  num_shards = hvd.size() if FLAGS.strategy=='horovod' else num_shards
   params = dict(
       config.as_dict(),
       model_name=FLAGS.model_name,
@@ -259,13 +259,15 @@ def main(_):
   max_instances_per_image = config.max_instances_per_image
   use_tpu = (FLAGS.strategy == 'tpu')
 
+  train_batch_size = FLAGS.train_batch_size / hvd.size() if FLAGS.strategy == 'horovod' else FLAGS.train_batch_size
+  eval_batch_size = FLAGS.eval_batch_size / hvd.size() if FLAGS.strategy == 'horovod' else FLAGS.eval_batch_size
   # TPU Estimator
   logging.info(params)
   if FLAGS.mode == 'train':
     train_estimator = tf.estimator.tpu.TPUEstimator(
         model_fn=model_fn_instance,
         use_tpu=use_tpu,
-        train_batch_size=FLAGS.train_batch_size,
+        train_batch_size=train_batch_size,
         config=run_config,
         params=params)
     train_estimator.train(
@@ -275,7 +277,7 @@ def main(_):
             use_fake_data=FLAGS.use_fake_data,
             max_instances_per_image=max_instances_per_image),
         max_steps=int((config.num_epochs * FLAGS.num_examples_per_epoch) /
-                      FLAGS.train_batch_size))
+                      train_batch_size))
 
     if FLAGS.eval_after_training:
       # Run evaluation after training finishes.
@@ -289,8 +291,8 @@ def main(_):
       eval_estimator = tf.estimator.tpu.TPUEstimator(
           model_fn=model_fn_instance,
           use_tpu=use_tpu,
-          train_batch_size=FLAGS.train_batch_size,
-          eval_batch_size=FLAGS.eval_batch_size,
+          train_batch_size=train_batch_size,
+          eval_batch_size=eval_batch_size,
           config=run_config,
           params=eval_params)
       eval_results = eval_estimator.evaluate(
@@ -298,7 +300,7 @@ def main(_):
               FLAGS.validation_file_pattern,
               is_training=False,
               max_instances_per_image=max_instances_per_image),
-          steps=FLAGS.eval_samples // FLAGS.eval_batch_size,
+          steps=FLAGS.eval_samples // eval_batch_size,
           name=FLAGS.eval_name)
       logging.info('Eval results: %s', eval_results)
       ckpt = tf.train.latest_checkpoint(FLAGS.model_dir)
@@ -318,8 +320,8 @@ def main(_):
     eval_estimator = tf.estimator.tpu.TPUEstimator(
         model_fn=model_fn_instance,
         use_tpu=use_tpu,
-        train_batch_size=FLAGS.train_batch_size,
-        eval_batch_size=FLAGS.eval_batch_size,
+        train_batch_size=train_batch_size,
+        eval_batch_size=eval_batch_size,
         config=run_config,
         params=eval_params)
 
@@ -342,7 +344,7 @@ def main(_):
                 FLAGS.validation_file_pattern,
                 is_training=False,
                 max_instances_per_image=max_instances_per_image),
-            steps=FLAGS.eval_samples // FLAGS.eval_batch_size,
+            steps=FLAGS.eval_samples // eval_batch_size,
             name=FLAGS.eval_name)
         logging.info('Eval results: %s', eval_results)
 
@@ -355,7 +357,7 @@ def main(_):
 
         utils.archive_ckpt(eval_results, eval_results['AP'], ckpt)
         total_step = int((config.num_epochs * FLAGS.num_examples_per_epoch) /
-                         FLAGS.train_batch_size)
+                         train_batch_size)
         if current_step >= total_step:
           logging.info('Evaluation finished after training step %d',
                        current_step)
@@ -375,7 +377,7 @@ def main(_):
       train_estimator = tf.estimator.tpu.TPUEstimator(
           model_fn=model_fn_instance,
           use_tpu=use_tpu,
-          train_batch_size=FLAGS.train_batch_size,
+          train_batch_size=train_batch_size,
           config=run_config,
           params=params)
       train_estimator.train(
@@ -384,7 +386,7 @@ def main(_):
               is_training=True,
               use_fake_data=FLAGS.use_fake_data,
               max_instances_per_image=max_instances_per_image),
-          steps=int(FLAGS.num_examples_per_epoch / FLAGS.train_batch_size))
+          steps=int(FLAGS.num_examples_per_epoch / train_batch_size))
 
       logging.info('Starting evaluation cycle, epoch: %d.', cycle)
       # Run evaluation after every epoch.
@@ -398,8 +400,8 @@ def main(_):
       eval_estimator = tf.estimator.tpu.TPUEstimator(
           model_fn=model_fn_instance,
           use_tpu=use_tpu,
-          train_batch_size=FLAGS.train_batch_size,
-          eval_batch_size=FLAGS.eval_batch_size,
+          train_batch_size=train_batch_size,
+          eval_batch_size=eval_batch_size,
           config=run_config,
           params=eval_params)
       eval_results = eval_estimator.evaluate(
@@ -407,7 +409,7 @@ def main(_):
               FLAGS.validation_file_pattern,
               is_training=False,
               max_instances_per_image=max_instances_per_image),
-          steps=FLAGS.eval_samples // FLAGS.eval_batch_size,
+          steps=FLAGS.eval_samples // eval_batch_size,
           name=FLAGS.eval_name)
       logging.info('Evaluation results: %s', eval_results)
       ckpt = tf.train.latest_checkpoint(FLAGS.model_dir)
