@@ -14,6 +14,7 @@
 # limitations under the License.
 # =============================================================================
 """Mosaic data augmentation test case"""
+from absl import logging
 from keras.mosaic import mosaic
 import tensorflow as tf
 
@@ -21,8 +22,9 @@ import tensorflow as tf
 class MosaicTest(tf.test.TestCase):
 
   def test_generate_image(self):
+    tf.random.set_seed(111111)
     images = [tf.ones([512, 512, 3])] * 4
-    boxes = [tf.constant([[211, 263, 339, 324], [264, 165, 372, 253]])] * 4
+    boxes = [tf.constant([[0.3, 0.4, 0.5, 0.6], [0.3, 0.4, 0.5, 0.6]])] * 4
     classes = [[1, 2]] * 4
     size = [512, 512]
     image, boxes, classes = mosaic(images, boxes, classes, size)

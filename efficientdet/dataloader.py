@@ -291,28 +291,22 @@ class InputReader(object):
         for i in range(4):
           data = example_decoder.decode(value[i])
           image = data['image']
-          image = tf.cast(tf.compat.v1.image.resize_image_with_pad(image,
-                                          *utils.parse_image_size(params['image_size'])),
-                          tf.uint8)
+          box = data['groundtruth_boxes']
+          clazz = tf.reshape(tf.cast(data['groundtruth_classes'], dtype=tf.float32), [-1, 1])
+          input_processor = DetectionInputProcessor(image, params['image_size'],
+                                                    box, clazz)
+          input_processor.set_scale_factors_to_output_size()
+          image = input_processor.resize_and_crop_image()
+          box, clazz = input_processor.resize_and_crop_boxes()
           images.append(image)
-          image_shape = tf.cast(tf.shape(image), tf.float32)
-          ymin = data['groundtruth_boxes'][:, 0] * image_shape[0]
-          xmin = data['groundtruth_boxes'][:, 1] * image_shape[1]
-          ymax = data['groundtruth_boxes'][:, 2] * image_shape[0]
-          xmax = data['groundtruth_boxes'][:, 3] * image_shape[1]
-          boxes.append(tf.cast(tf.stack([ymin, xmin, ymax, xmax], axis=1), tf.int32))
-          classes.append(tf.reshape(tf.cast(data['groundtruth_classes'], dtype=tf.float32), [-1, 1]))
+          boxes.append(box)
+          classes.append(clazz)
 
         areas = [0.]
         is_crowds = [False]
         source_id = ""
         image_size = [*utils.parse_image_size(params['image_size']),3]
         image, boxes, classes = mosaic(images, boxes, classes, image_size)
-        ymin = boxes[:, 0] / image_size[0]
-        xmin = boxes[:, 1] / image_size[1]
-        ymax = boxes[:, 2] / image_size[0]
-        xmax = boxes[:, 3] / image_size[1]
-        boxes = tf.cast(tf.stack([ymin, xmin, ymax, xmax], axis=1), tf.float32)
       else:
         data = example_decoder.decode(value)
         source_id = data['source_id']
@@ -421,7 +415,7 @@ class InputReader(object):
 
     # Prefetch data from files.
     def _prefetch_dataset(filename):
-      dataset = tf.data.TFRecordDataset(filename).prefetch(1)
+      dataset = tf.data.TFRecordDataset(filename, 'GZIP').prefetch(1)
       return dataset
 
     dataset = dataset.interleave(

@@ -185,6 +185,7 @@ def default_detection_configs():
   h.train_scale_max = 2.0
   h.autoaugment_policy = None
   h.use_augmix = False
+  h.use_mosaic = False
   # mixture_width, mixture_depth, alpha
   h.augmix_params = (3, -1, 1)
 

@@ -48,30 +48,45 @@ def calculate_boxes_offset(box, offset_y, offset_x):
 
 def mosaic(images, boxes, classes, size):
   with tf.name_scope('mosaic'):
-    y = tf.cast(
-        tf.random.uniform([], size[0] / 4, size[0] * 3 / 4), dtype=tf.int32)
-    x = tf.cast(
-        tf.random.uniform([], size[1] / 4, size[1] * 3 / 4), dtype=tf.int32)
+    y = tf.random.uniform([], 0.25, 0.75)
+    x = tf.random.uniform([], 0.25, 0.75)
 
-    temp_size = [y, x, 3]
+    temp_size = tf.cast(
+        [tf.math.round(y * size[0]),
+         tf.math.round(x * size[1]), 3], tf.int32)
     crop_image1, offset = crop_image_and_box(images[0], temp_size)
-    box = calculate_boxes_offset(boxes[0], -offset[0], -offset[1])
+    box = calculate_boxes_offset(boxes[0],
+                                 tf.cast(-offset[0] / size[0], tf.float32),
+                                 tf.cast(-offset[1], tf.float32))
     boxes[0], classes[0] = clip_box(box, classes[0], [0, 0], [y, x])
 
-    temp_size = [size[0] - y, x, 3]
+    temp_size = tf.cast(
+        [tf.math.round(size[0] - y * size[0]),
+         tf.math.round(x * size[1]), 3], tf.int32)
     crop_image2, offset = crop_image_and_box(images[1], temp_size)
-    box = calculate_boxes_offset(boxes[1], y - offset[0], -offset[1])
-    boxes[1], classes[1] = clip_box(box, classes[1], [y, 0], [size[0], x])
+    box = calculate_boxes_offset(boxes[1],
+                                 y - tf.cast(offset[0] / size[0], tf.float32),
+                                 tf.cast(-offset[1] / size[1], tf.float32))
+    boxes[1], classes[1] = clip_box(box, classes[1], [y, 0], [1, x])
 
-    temp_size = [y, size[1] - x, 3]
+    temp_size = tf.cast(
+        [tf.math.round(y * size[0]),
+         tf.math.round(size[1] - x * size[1]), 3], tf.int32)
     crop_image3, offset = crop_image_and_box(images[2], temp_size)
-    box = calculate_boxes_offset(boxes[2], -offset[0], x - offset[1])
-    boxes[2], classes[2] = clip_box(box, classes[2], [0, x], [y, size[1]])
+    box = calculate_boxes_offset(boxes[2],
+                                 tf.cast(-offset[0] / size[0], tf.float32),
+                                 x - tf.cast(offset[1] / size[1], tf.float32))
+    boxes[2], classes[2] = clip_box(box, classes[2], [0, x], [y, 1])
 
-    temp_size = [size[0] - y, size[1] - x, 3]
+    temp_size = tf.cast([
+        tf.math.round(size[0] - y * size[0]),
+        tf.math.round(size[1] - x * size[1]), 3
+    ], tf.int32)
     crop_image4, offset = crop_image_and_box(images[3], temp_size)
-    box = calculate_boxes_offset(boxes[3], y - offset[0], x - offset[1])
-    boxes[3], classes[3] = clip_box(box, classes[3], [y, x], size[:2])
+    box = calculate_boxes_offset(boxes[3],
+                                 y - tf.cast(offset[0] / size[0], tf.float32),
+                                 x - tf.cast(offset[1] / size[1], tf.float32))
+    boxes[3], classes[3] = clip_box(box, classes[3], [y, x], [1, 1])
 
     temp1 = tf.concat([crop_image1, crop_image2], axis=0)
     temp2 = tf.concat([crop_image3, crop_image4], axis=0)
