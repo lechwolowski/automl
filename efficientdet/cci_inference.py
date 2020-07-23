@@ -124,11 +124,11 @@ def batch_image_preprocess(raw_images,
       _image_preprocess, raw_images, dtype=tf.float32, parallel_iterations=32))
   height = tf.cast(tf.shape(images)[1], tf.float32)
   width = tf.cast(tf.shape(images)[2], tf.float32)
-  image_scale_y = tf.cast(image_size[0], tf.float32) / height
-  image_scale_x = tf.cast(image_size[1], tf.float32) / width
+  image_scale_y = image_size[0] / height
+  image_scale_x = image_size[1] / width
   image_scales = tf.minimum(image_scale_x, image_scale_y)
   images = tf.image.resize_image_with_pad(
-    images, image_scale_y, image_scale_x, align_corners=True)
+    images, image_size[0], image_size[1], align_corners=True)
   return images, image_scales
 
 
@@ -491,7 +491,7 @@ class ServingDriver(object):
           tf.OptimizerOptions.ON_2)
     return tf.Session(config=sess_config)
 
-  def build(self, params_override=None, from_base64=True):
+  def build(self, params_override=None, from_base64=False):
     """Build model and restore checkpoints."""
     params = copy.deepcopy(self.params)
     if params_override:
@@ -506,13 +506,13 @@ class ServingDriver(object):
         images = tf.identity(raw_images, name='image_arrays')
         scales = tf.identity(image_scales, name='image_scales')
       else:
-        raw_images = tf.placeholder(tf.uint8, name='image_arrays', shape=[None, *params['image_size'], 3])
+        image_files=None
+        raw_images = tf.placeholder(tf.uint8, name='image_arrays', shape=[None, None, None, 3])
         images, scales = batch_image_preprocess(raw_images, params['image_size'])
       if params['data_format'] == 'channels_first':
         images = tf.transpose(images, [0, 3, 1, 2])
-      class_outputs, box_outputs = build_model(self.model_name, images,
-                                               **params)
-      params.update(dict(batch_size=self.batch_size))
+      class_outputs, box_outputs = build_model(self.model_name, images, **params)
+      # params.update(dict(batch_size=self.batch_size))
       nms_boxes, nms_scores, nms_classes = det_post_process(params, class_outputs, box_outputs, scales)
 
       restore_ckpt(

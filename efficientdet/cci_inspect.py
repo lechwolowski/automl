@@ -197,10 +197,10 @@ class ModelInspector(object):
         model_params=self.model_config.as_dict(),
         **kwargs)
     driver.load(self.saved_model_dir)
-    raw_images = []
     all_files = list(tf.io.gfile.glob(image_path_pattern))
     if len(all_files) < self.batch_size:
       all_files = all_files * (self.batch_size // len(all_files) + 1)
+
     raw_images = [np.array(Image.open(f)) for f in all_files[:self.batch_size]]
     driver.benchmark(raw_images, trace_filename)
 
