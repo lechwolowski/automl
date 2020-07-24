@@ -265,7 +265,7 @@ def det_post_process(params: Dict[Any, Any], cls_outputs: Dict[int, tf.Tensor],
     detections_batch: a batch of detection results. Each detection is a tensor
       with each row as [image_id, ymin, xmin, ymax, xmax, score, class].
   """
-  batch_size = cls_outputs[params['min_level']].shape[0]
+  # batch_size = cls_outputs[params['min_level']].shape[0]
   # if not batch_size:
   #   # Use combined version for dynamic batch size.
   #   nms_boxes, nms_scores, nms_classes, _ = cci_postprocess.postprocess_combined(
@@ -277,15 +277,6 @@ def det_post_process(params: Dict[Any, Any], cls_outputs: Dict[int, tf.Tensor],
   nms_scores = tf.identity(nms_scores, name='scores')
   nms_classes = tf.identity(nms_classes, name='classes')
   return nms_boxes, nms_scores, nms_classes
-  # detections = [
-  #     nms_boxes[:, :, 0],
-  #     nms_boxes[:, :, 1],
-  #     nms_boxes[:, :, 2],
-  #     nms_boxes[:, :, 3],
-  #     nms_scores,
-  #     nms_classes,
-  # ]
-  # return tf.stack(detections, axis=-1, name='detections')
 
 
 def visualize_image(image,
@@ -512,7 +503,6 @@ class ServingDriver(object):
       if params['data_format'] == 'channels_first':
         images = tf.transpose(images, [0, 3, 1, 2])
       class_outputs, box_outputs = build_model(self.model_name, images, **params)
-      # params.update(dict(batch_size=self.batch_size))
       nms_boxes, nms_scores, nms_classes = det_post_process(params, class_outputs, box_outputs, scales)
 
       restore_ckpt(

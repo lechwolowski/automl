@@ -220,7 +220,7 @@ def postprocess_combined(params, cls_outputs, box_outputs, image_scales=None):
   return nms_boxes, nms_scores, nms_classes, nms_valid_len
 
 
-#@tf.function(experimental_compile=True)
+@tf.function(experimental_compile=True)
 def postprocess_global(params, cls_outputs, box_outputs, image_scales=None):
   """Post processing with global NMS.
 
