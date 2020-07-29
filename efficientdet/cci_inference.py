@@ -28,7 +28,8 @@ from typing import Text, Dict, Any, List, Tuple, Union
 from absl import logging
 import numpy as np
 from PIL import Image
-import tensorflow.compat.v1 as tf
+import tensorflow
+tf = tensorflow.compat.v1
 import yaml
 
 import dataloader
@@ -505,6 +506,23 @@ class ServingDriver(object):
       class_outputs, box_outputs = build_model(self.model_name, images, **params)
       nms_boxes, nms_scores, nms_classes = det_post_process(params, class_outputs, box_outputs, scales)
 
+      def _crop_images(data):
+        image, boxes = data
+
+        def _crop_image(data):
+          box = tf.cast(data, tf.int32)
+          crop_image = tf.image.crop_to_bounding_box(image, box[0], box[1], box[2] - box[0], box[3] - box[1])
+          return tf.image.encode_jpeg(crop_image, 'rgb', progressive=True, optimize_size=True)
+
+        encoded_crop_images = tf.nest.map_structure(
+          tf.stop_gradient,
+          tf.map_fn(_crop_image, (boxes), (tf.string), 32))
+        return encoded_crop_images
+
+      encoded_crop_images = tf.nest.map_structure(
+        tf.stop_gradient,
+        tf.map_fn(_crop_images, (raw_images, nms_boxes), (tf.string), 32))
+      encoded_crop_images = tf.identity(encoded_crop_images, 'crop_images')
       restore_ckpt(
           self.sess,
           self.ckpt_path,
@@ -518,6 +536,7 @@ class ServingDriver(object):
         'boxes': nms_boxes,
         'scores': nms_scores,
         'classes': nms_classes,
+        'crop_images': encoded_crop_images
     }
     return self.signitures
 

@@ -29,7 +29,8 @@ from absl import logging
 
 import numpy as np
 from PIL import Image
-import tensorflow.compat.v1 as tf
+import tensorflow
+tf = tensorflow.compat.v1
 
 import hparams_config
 import cci_inference

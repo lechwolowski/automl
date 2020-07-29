@@ -21,7 +21,6 @@ import tensorflow as tf
 import utils
 from keras import anchors
 T = tf.Tensor  # a shortcut for typing check.
-CLASS_OFFSET = 1
 
 
 def to_list(inputs):
@@ -175,7 +174,7 @@ def nms(params, boxes: T, scores: T, classes: T) -> Tuple[T, T, T, T]:
       pad_to_max_output_size=True)
 
   nms_boxes = tf.gather(boxes, nms_top_idx)
-  nms_classes = tf.gather(classes, nms_top_idx) + CLASS_OFFSET
+  nms_classes = tf.gather(classes, nms_top_idx)
   return nms_boxes, nms_scores, nms_classes, nms_valid_lens
 
 
@@ -211,7 +210,7 @@ def postprocess_combined(params, cls_outputs, box_outputs, image_scales=None):
           max_output_size,
           score_threshold=score_thresh,
           clip_boxes=False))
-  nms_classes += CLASS_OFFSET
+
   nms_boxes = clip_boxes(nms_boxes, params['image_size'])
   if image_scales is not None:
     scales = tf.expand_dims(tf.expand_dims(image_scales, -1), -1)
