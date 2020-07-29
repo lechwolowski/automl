@@ -26,7 +26,7 @@ import iou_utils
 import utils
 from keras import anchors
 from keras import efficientdet_keras
-
+import tensorflow_model_optimization as tfmot
 
 def update_learning_rate_schedule_parameters(params):
   """Updates params that are related to the learning rate schedule."""
@@ -193,6 +193,62 @@ def get_optimizer(params):
   return optimizer
 
 
+def _collect_prunable_layers(model):
+  """Recursively collect the prunable layers in the model."""
+  prunable_layers = []
+  for layer in model._layers:
+    # A keras model may have other models as layers.
+    if isinstance(layer, tfmot.sparsity.keras.pruning_wrapper.PruneLowMagnitude):
+      prunable_layers.append(layer)
+    elif isinstance(layer, (list, tf.keras.Model, tf.keras.layers.Layer)):
+      prunable_layers += _collect_prunable_layers(layer)
+
+  return prunable_layers
+
+
+class UpdatePruningStep(tf.keras.callbacks.Callback):
+  """Keras callback which updates pruning wrappers with the optimizer step.
+
+  This callback must be used when training a model which needs to be pruned. Not
+  doing so will throw an error.
+
+  Example:
+
+  ```python
+  model.fit(x, y,
+      callbacks=[UpdatePruningStep()])
+  ```
+  """
+
+  def on_train_begin(self, logs=None):
+    self.step = tf.keras.backend.get_value(self.model.optimizer.iterations)
+
+  def on_train_batch_begin(self, batch, logs=None):
+    tuples = []
+
+    prunable_layers = _collect_prunable_layers(self.model)
+    for layer in prunable_layers:
+      if layer.built:
+        tuples.append((layer.pruning_step, self.step))
+
+    tf.keras.backend.batch_set_value(tuples)
+    self.step = self.step + 1
+
+  def on_epoch_end(self, batch, logs=None):
+    # At the end of every epoch, remask the weights. This ensures that when
+    # the model is saved after completion, the weights represent mask*weights.
+    weight_mask_ops = []
+
+    prunable_layers = _collect_prunable_layers(self.model)
+    for layer in prunable_layers:
+      if isinstance(layer, tfmot.sparsity.keras.pruning_wrapper.PruneLowMagnitude):
+        if tf.executing_eagerly():
+          layer.pruning_obj.weight_mask_op()
+        else:
+          weight_mask_ops.append(layer.pruning_obj.weight_mask_op())
+
+    tf.keras.backend.batch_get_value(weight_mask_ops)
+
 class DisplayCallback(tf.keras.callbacks.Callback):
   """Display inference result callback."""
 
@@ -259,6 +315,11 @@ def get_callbacks(params, profile=False):
         params.get('sample_image', None),
         os.path.join(params['model_dir'], 'train'))
     callbacks.append(display_callback)
+  if params['prune']:
+    callbacks += [
+      UpdatePruningStep(),
+      tfmot.sparsity.keras.PruningSummaries(log_dir=params['model_dir'])
+    ]
   return callbacks
 
 

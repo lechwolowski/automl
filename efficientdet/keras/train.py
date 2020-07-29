@@ -24,6 +24,7 @@ import hparams_config
 import utils
 from keras import train_lib
 
+
 # Cloud TPU Cluster Resolvers
 flags.DEFINE_string(
     'tpu',
@@ -120,8 +121,8 @@ def main(_):
 
   if FLAGS.debug:
     tf.config.experimental_run_functions_eagerly(True)
-    tf.debugging.set_log_device_placement(True)
     tf.random.set_seed(111111)
+    tf.debugging.experimental.enable_dump_debug_info(os.path.join(FLAGS.model_dir, 'debug'), 'FULL_HEALTH')
     logging.set_verbosity(logging.DEBUG)
 
   if FLAGS.strategy == 'tpu':
