@@ -165,7 +165,7 @@ def default_detection_configs():
   """Returns a default detection configs."""
   h = Config()
 
-  h.prune = True
+  h.prune = False
 
   # model name.
   h.name = 'efficientdet-d1'
