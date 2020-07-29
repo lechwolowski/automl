@@ -25,9 +25,11 @@ from backbone import backbone_factory
 from backbone import efficientnet_builder
 from keras import fpn_configs
 from keras import postprocess
-from keras import util_keras
-# pylint: disable=arguments-differ  # fo keras layers.
 
+from keras import util_keras
+import tensorflow_model_optimization as tfmot
+
+# pylint: disable=arguments-differ  # fo keras layers.
 
 class FNode(tf.keras.layers.Layer):
   """A Keras Layer implementing BiFPN Node."""
@@ -237,6 +239,7 @@ class ResampleFeatureMap(tf.keras.layers.Layer):
                conv_after_downsample=False,
                strategy=None,
                data_format=None,
+               prune=False,
                name='resample_p0'):
     super().__init__(name=name)
     self.apply_bn = apply_bn
@@ -252,6 +255,9 @@ class ResampleFeatureMap(tf.keras.layers.Layer):
         padding='same',
         data_format=self.data_format,
         name='conv2d')
+
+    if prune:
+      self.conv2d = tfmot.sparsity.keras.prune_low_magnitude(self.conv2d)
     self.bn = util_keras.build_batch_norm(
         is_training_bn=self.is_training_bn,
         data_format=self.data_format,
@@ -751,6 +757,7 @@ class EfficientDetNet(tf.keras.Model):
               conv_after_downsample=config.conv_after_downsample,
               strategy=config.strategy,
               data_format=config.data_format,
+              prune=config.prune,
               name='resample_p%d' % level,
           ))
     self.fpn_cells = FPNCells(config)
