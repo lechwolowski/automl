@@ -480,6 +480,35 @@ class EfficientDetNetTrain(efficientdet_keras.EfficientDetNet):
     levels = range(len(cls_outputs))
     cls_losses = []
     box_losses = []
+
+    # cls_outputs = tf.concat([tf.reshape(v, [-1, self.config.num_classes]) for v in cls_outputs],
+    #                     axis=0)
+    # box_outputs = tf.concat([tf.reshape(v, [-1, 4]) for v in box_outputs],
+    #                     axis=0)
+    # cls_targets = tf.concat([tf.reshape(
+    #   tf.one_hot(labels['cls_targets_%d' % (level + 3)],
+    #   self.config.num_classes), [-1, self.config.num_classes])
+    #   for level in levels
+    #   ], axis=0)
+    # box_targets = tf.concat([
+    #     tf.reshape(labels['box_targets_%d' % (level + 3)], [-1, 4])
+    #     for level in levels
+    # ], axis=0)
+    # class_loss_layer = self.loss.get('class_loss', None)
+    # if class_loss_layer:
+    #   cls_loss = class_loss_layer([num_positives_sum, cls_targets],
+    #                               cls_outputs)
+
+    # if self.config.box_loss_weight and self.loss.get('box_loss', None):
+    #   box_loss_layer = self.loss['box_loss']
+    #   box_losses.append(
+    #       box_loss_layer([num_positives_sum, box_targets],
+    #                       box_outputs))
+
+    # cls_loss = alpha*cls_loss+(1-alpha) * tf.keras.losses.MSE(teacher_cls_outputs, cls_outputs)
+    # box_loss = alpha*box_loss+(1-alpha) * tf.keras.losses.MSE(teacher_box_outputs, box_outputs)
+
+
     for level in levels:
       # Onehot encoding for classification labels.
       cls_targets_at_level = tf.one_hot(labels['cls_targets_%d' % (level + 3)],
@@ -506,6 +535,7 @@ class EfficientDetNetTrain(efficientdet_keras.EfficientDetNet):
         else:
           cls_loss = tf.reshape(
               cls_loss, [bs, width, height, -1, self.config.num_classes])
+        # Don't understand???
         cls_loss *= tf.cast(
             tf.expand_dims(
                 tf.not_equal(labels['cls_targets_%d' % (level + 3)], -2), -1),
@@ -559,6 +589,7 @@ class EfficientDetNetTrain(efficientdet_keras.EfficientDetNet):
     images, labels = data
     with tf.GradientTape() as tape:
       if len(self.config.heads) == 2:
+        # teacher_cls_outputs, teacher_box_outputs = self.teacher(images, training=False)
         cls_outputs, box_outputs, seg_outputs = self(images, training=True)
       elif 'object_detection' in self.config.heads:
         cls_outputs, box_outputs = self(images, training=True)
