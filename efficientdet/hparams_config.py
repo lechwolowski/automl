@@ -166,6 +166,7 @@ def default_detection_configs():
   h = Config()
 
   h.prune = False
+  h.quantize = False
 
   # model name.
   h.name = 'efficientdet-d1'
@@ -250,7 +251,7 @@ def default_detection_configs():
   h.nms_configs = {
       'method': 'gaussian',
       'iou_thresh': None,  # use the default value based on method.
-      'score_thresh': None,
+      'score_thresh': 0.2,
       'sigma': None,
       'max_nms_inputs': 0,
       'max_output_size': 100,

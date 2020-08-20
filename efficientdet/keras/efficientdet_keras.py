@@ -239,6 +239,7 @@ class ResampleFeatureMap(tf.keras.layers.Layer):
                pooling_type=None,
                upsampling_type=None,
                prune=False,
+               quantize=False,
                name='resample_p0'):
     super().__init__(name=name)
     self.apply_bn = apply_bn
@@ -259,6 +260,8 @@ class ResampleFeatureMap(tf.keras.layers.Layer):
 
     if prune:
       self.conv2d = tfmot.sparsity.keras.prune_low_magnitude(self.conv2d)
+    if quantize:
+      self.conv2d = tfmot.quantization.keras.quantize_annotate_layer(self.conv2d)
     self.bn = util_keras.build_batch_norm(
         is_training_bn=self.is_training_bn,
         data_format=self.data_format,
@@ -756,6 +759,7 @@ class EfficientDetNet(tf.keras.Model):
               strategy=config.strategy,
               data_format=config.data_format,
               prune=config.prune,
+              quantize=config.quantize,
               name='resample_p%d' % level,
           ))
     self.fpn_cells = FPNCells(config)

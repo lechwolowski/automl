@@ -16,7 +16,9 @@
 from concurrent import futures
 import math
 import os
+
 import re
+import copy
 from absl import logging
 import numpy as np
 import tensorflow as tf
@@ -27,6 +29,7 @@ import utils
 from keras import anchors
 from keras import efficientdet_keras
 import tensorflow_model_optimization as tfmot
+from tensorflow_model_optimization.python.core.sparsity.keras import pruning_wrapper
 
 def update_learning_rate_schedule_parameters(params):
   """Updates params that are related to the learning rate schedule."""
@@ -198,7 +201,7 @@ def _collect_prunable_layers(model):
   prunable_layers = []
   for layer in model._layers:
     # A keras model may have other models as layers.
-    if isinstance(layer, tfmot.sparsity.keras.pruning_wrapper.PruneLowMagnitude):
+    if isinstance(layer, pruning_wrapper.PruneLowMagnitude):
       prunable_layers.append(layer)
     elif isinstance(layer, (list, tf.keras.Model, tf.keras.layers.Layer)):
       prunable_layers += _collect_prunable_layers(layer)
@@ -241,7 +244,7 @@ class UpdatePruningStep(tf.keras.callbacks.Callback):
 
     prunable_layers = _collect_prunable_layers(self.model)
     for layer in prunable_layers:
-      if isinstance(layer, tfmot.sparsity.keras.pruning_wrapper.PruneLowMagnitude):
+      if isinstance(layer, pruning_wrapper.PruneLowMagnitude):
         if tf.executing_eagerly():
           layer.pruning_obj.weight_mask_op()
         else:
@@ -296,11 +299,73 @@ class DisplayCallback(tf.keras.callbacks.Callback):
     with self.file_writer.as_default():
       tf.summary.image('Test image', tf.expand_dims(image, axis=0), step=epoch)
 
+class CocoMetricCallback(tf.keras.callbacks.Callback):
+  """Display inference result callback."""
+
+  def __init__(self, test_data_dir, val_json_file=None, update_freq=1, enable_tta=False):
+    super().__init__()
+    import coco_metric
+    self.evaluator = coco_metric.EvaluationMetric(filename=val_json_file)
+    self.test_data_dir = test_data_dir
+    self.update_freq = update_freq
+    self.enable_tta = enable_tta
+
+  def set_model(self, model: tf.keras.Model):
+    import dataloader
+    self.model = model
+    self.config = copy.deepcopy(self.model.config)
+    self.file_writer = tf.summary.create_file_writer(self.output_dir)
+    max_boxes_to_draw = self.config.nms_configs['max_output_size'] or 100
+    self.ds = dataloader.InputReader(
+      self.test_data_dir,
+      is_training=False,
+      use_fake_data=False,
+      max_instances_per_image=max_boxes_to_draw)(self.config)
+
+  def on_epoch_end(self, epoch, logs=None):
+    from keras import postprocess
+    from keras import wbf
+    if epoch % self.update_freq == 0:
+      for images, labels in self.ds:
+        self.config.nms_configs.max_nms_inputs = anchors.MAX_DETECTION_POINTS
+
+        cls_outputs, box_outputs = self.model(images, training=False)
+        detections = postprocess.generate_detections(self.config, cls_outputs,
+                                                     box_outputs,
+                                                     labels['image_scales'],
+                                                     labels['source_ids'], False)
+
+        if self.enable_tta:
+          images_flipped = tf.image.flip_left_right(images)
+          cls_outputs_flipped, box_outputs_flipped = self.model(
+            images_flipped, training=False)
+          detections_flipped = postprocess.generate_detections(
+            self.config, cls_outputs_flipped, box_outputs_flipped,
+            labels['image_scales'], labels['source_ids'], True)
+
+          for d, df in zip(detections, detections_flipped):
+            combined_detections = wbf.ensemble_detections(self.config,
+                                                          tf.concat([d, df], 0))
+            combined_detections = tf.stack([combined_detections])
+            self.evaluator.update_state(
+              labels['groundtruth_data'].numpy(),
+              postprocess.transform_detections(combined_detections).numpy())
+        else:
+          self.evaluator.update_state(
+            labels['groundtruth_data'].numpy(),
+            postprocess.transform_detections(detections).numpy())
+
+      # compute the final eval results.
+      metric_values = self.evaluator.result()
+      with self.file_writer.as_default():
+        for i, metric_value in enumerate(metric_values):
+          tf.summary.scalar(self.evaluator.metric_names[i], metric_value, step=epoch)
+
 
 def get_callbacks(params, profile=False):
   """Get callbacks for given params."""
   tb_callback = tf.keras.callbacks.TensorBoard(
-      log_dir=params['model_dir'], profile_batch=2 if profile else 0)
+      log_dir=params['model_dir'], profile_batch=2 if profile else 0, update_freq='batch')
   ckpt_callback = tf.keras.callbacks.ModelCheckpoint(
       f"{params['model_dir']}/ckpt", verbose=1, save_weights_only=True)
   early_stopping = tf.keras.callbacks.EarlyStopping(
@@ -483,45 +548,30 @@ class EfficientDetNetTrain(efficientdet_keras.EfficientDetNet):
     # num_positives_sum, which would lead to inf loss during training
     num_positives_sum = tf.reduce_sum(labels['mean_num_positives']) + 1.0
     levels = range(len(cls_outputs))
-    cls_losses = []
-    box_losses = []
-    for level in levels:
-      # Onehot encoding for classification labels.
-      cls_targets_at_level = tf.one_hot(labels['cls_targets_%d' % (level + 3)],
-                                        self.config.num_classes)
 
-      if self.config.data_format == 'channels_first':
-        bs, _, width, height, _ = cls_targets_at_level.get_shape().as_list()
-        cls_targets_at_level = tf.reshape(cls_targets_at_level,
-                                          [bs, -1, width, height])
-      else:
-        bs, width, height, _, _ = cls_targets_at_level.get_shape().as_list()
-        cls_targets_at_level = tf.reshape(cls_targets_at_level,
-                                          [bs, width, height, -1])
-      box_targets_at_level = labels['box_targets_%d' % (level + 3)]
+    cls_outputs = tf.concat([tf.reshape(v, [-1, self.config.num_classes]) for v in cls_outputs],
+                        axis=0)
+    box_outputs = tf.concat([tf.reshape(v, [-1, 4]) for v in box_outputs],
+                        axis=0)
+    cls_targets = tf.concat([tf.reshape(
+      tf.one_hot(labels['cls_targets_%d' % (level + 3)],
+      self.config.num_classes), [-1, self.config.num_classes])
+      for level in levels
+      ], axis=0)
+    box_targets = tf.concat([
+        tf.reshape(labels['box_targets_%d' % (level + 3)], [-1, 4])
+        for level in levels
+    ], axis=0)
+    class_loss_layer = self.loss.get('class_loss', None)
+    cls_loss = tf.reduce_sum(class_loss_layer([num_positives_sum, cls_targets],
+                                  cls_outputs))
 
-      class_loss_layer = self.loss.get('class_loss', None)
-      if class_loss_layer:
-        cls_loss = class_loss_layer([num_positives_sum, cls_targets_at_level],
-                                    cls_outputs[level])
-
-        if self.config.data_format == 'channels_first':
-          cls_loss = tf.reshape(
-              cls_loss, [bs, -1, width, height, self.config.num_classes])
-        else:
-          cls_loss = tf.reshape(
-              cls_loss, [bs, width, height, -1, self.config.num_classes])
-        cls_loss *= tf.cast(
-            tf.expand_dims(
-                tf.not_equal(labels['cls_targets_%d' % (level + 3)], -2), -1),
-            tf.float32)
-        cls_losses.append(tf.reduce_sum(cls_loss))
-
-      if self.config.box_loss_weight and self.loss.get('box_loss', None):
-        box_loss_layer = self.loss['box_loss']
-        box_losses.append(
-            box_loss_layer([num_positives_sum, box_targets_at_level],
-                           box_outputs[level]))
+    if self.config.box_loss_weight and self.loss.get('box_loss', None):
+      box_loss_layer = self.loss['box_loss']
+      box_loss = tf.reduce_sum(box_loss_layer([num_positives_sum, box_targets],
+                      box_outputs))
+    else:
+      box_loss = 0
 
     if self.config.iou_loss_type:
       box_outputs = tf.concat([tf.reshape(v, [-1, 4]) for v in box_outputs],
@@ -538,8 +588,6 @@ class EfficientDetNetTrain(efficientdet_keras.EfficientDetNet):
     else:
       box_iou_loss = 0
 
-    cls_loss = tf.add_n(cls_losses) if cls_losses else 0
-    box_loss = tf.add_n(box_losses) if box_losses else 0
     total_loss = (
         cls_loss + self.config.box_loss_weight * box_loss +
         self.config.iou_loss_weight * box_iou_loss)

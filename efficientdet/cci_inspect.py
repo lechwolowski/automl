@@ -29,8 +29,7 @@ from absl import logging
 
 import numpy as np
 from PIL import Image
-import tensorflow
-tf = tensorflow.compat.v1
+import tensorflow.compat.v1 as tf
 
 import hparams_config
 import cci_inference
@@ -48,7 +47,7 @@ flags.DEFINE_string('tensorrt', None, 'TensorRT mode: {None, FP32, FP16, INT8}')
 flags.DEFINE_bool('delete_logdir', True, 'Whether to delete logdir.')
 flags.DEFINE_bool('freeze', False, 'Freeze graph.')
 flags.DEFINE_bool('use_xla', False, 'Run with xla optimization.')
-flags.DEFINE_integer('batch_size', 8, 'Batch size for inference.')
+flags.DEFINE_integer('batch_size', None, 'Batch size for inference.')
 
 flags.DEFINE_string('ckpt_path', None, 'checkpoint dir used for eval.')
 flags.DEFINE_string('export_ckpt', None, 'Path for exporting new models.')
@@ -177,9 +176,9 @@ class ModelInspector(object):
         padding_size = batch_size - size_before_pad
         raw_images += [np.zeros_like(raw_images[0])] * padding_size
 
-      boxes, scores, classes = driver.serve_images(raw_images)
+      detections_bs = driver.serve_images(raw_images)
       for j in range(size_before_pad):
-        img = driver.visualize(raw_images[j], boxes[j], scores[j], classes[j], **kwargs)
+        img = driver.visualize(raw_images[j], detections_bs[j], **kwargs)
         img_id = str(i * batch_size + j)
         output_image_path = os.path.join(output_dir, img_id + '.jpg')
         Image.fromarray(img).save(output_image_path)

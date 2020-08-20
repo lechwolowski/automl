@@ -13,53 +13,25 @@
 # limitations under the License.
 # ==============================================================================
 r"""Inference related utilities."""
-
-from __future__ import absolute_import
-from __future__ import division
-# gtype import
-from __future__ import print_function
-
 import copy
 import functools
 import os
 import time
 from typing import Text, Dict, Any, List, Tuple, Union
-
 from absl import logging
 import numpy as np
 from PIL import Image
-import tensorflow
-tf = tensorflow.compat.v1
-import yaml
+import tensorflow.compat.v1 as tf
 
 import dataloader
 import det_model_fn
 import hparams_config
 import utils
 from keras import efficientdet_keras
-import cci_postprocess
+from keras import label_util
+import cci_postprocess as postprocess
 from visualize import vis_utils
 from tensorflow.python.client import timeline  # pylint: disable=g-direct-tensorflow-import
-
-coco_id_mapping = {
-    1: 'person', 2: 'bicycle', 3: 'car', 4: 'motorcycle', 5: 'airplane',
-    6: 'bus', 7: 'train', 8: 'truck', 9: 'boat', 10: 'traffic light',
-    11: 'fire hydrant', 13: 'stop sign', 14: 'parking meter', 15: 'bench',
-    16: 'bird', 17: 'cat', 18: 'dog', 19: 'horse', 20: 'sheep', 21: 'cow',
-    22: 'elephant', 23: 'bear', 24: 'zebra', 25: 'giraffe', 27: 'backpack',
-    28: 'umbrella', 31: 'handbag', 32: 'tie', 33: 'suitcase', 34: 'frisbee',
-    35: 'skis', 36: 'snowboard', 37: 'sports ball', 38: 'kite',
-    39: 'baseball bat', 40: 'baseball glove', 41: 'skateboard', 42: 'surfboard',
-    43: 'tennis racket', 44: 'bottle', 46: 'wine glass', 47: 'cup', 48: 'fork',
-    49: 'knife', 50: 'spoon', 51: 'bowl', 52: 'banana', 53: 'apple',
-    54: 'sandwich', 55: 'orange', 56: 'broccoli', 57: 'carrot', 58: 'hot dog',
-    59: 'pizza', 60: 'donut', 61: 'cake', 62: 'chair', 63: 'couch',
-    64: 'potted plant', 65: 'bed', 67: 'dining table', 70: 'toilet', 72: 'tv',
-    73: 'laptop', 74: 'mouse', 75: 'remote', 76: 'keyboard', 77: 'cell phone',
-    78: 'microwave', 79: 'oven', 80: 'toaster', 81: 'sink', 82: 'refrigerator',
-    84: 'book', 85: 'clock', 86: 'vase', 87: 'scissors', 88: 'teddy bear',
-    89: 'hair drier', 90: 'toothbrush',
-}  # pyformat: disable
 
 
 def image_preprocess(image, image_size: Union[int, Tuple[int, int]]):
@@ -82,28 +54,17 @@ def image_preprocess(image, image_size: Union[int, Tuple[int, int]]):
 
 
 @tf.function(experimental_compile=True)
-def batch_image_files_decode(image_files, image_size):
-  def _decode_image(image_file):
-    image = tf.io.decode_image(image_file, channels=3)
-    image.set_shape([None, None, 3])
-    input_processor = dataloader.DetectionInputProcessor(image, image_size)
-    input_processor.normalize_image()
-    height = tf.cast(tf.shape(input_processor._image)[0], tf.float32)
-    width = tf.cast(tf.shape(input_processor._image)[1], tf.float32)
-    image_scale_y = tf.cast(input_processor._output_size[0], tf.float32) / height
-    image_scale_x = tf.cast(input_processor._output_size[1], tf.float32) / width
-    image_scale = tf.minimum(image_scale_x, image_scale_y)
-    image = tf.image.resize_image_with_pad(
-        input_processor._image, input_processor._output_size[0], input_processor._output_size[1], align_corners=True)
-    return image, image_scale
-
-  raw_images, image_scales = tf.nest.map_structure(tf.stop_gradient, tf.map_fn(_decode_image,
-    image_files, dtype=(tf.float32, tf.float32), parallel_iterations=32))
-  return raw_images, image_scales
+def batch_image_files_decode(image_files):
+  def _map_fn(image_file):
+    image = tf.io.decode_image(image_file)
+    image.set_shape([None, None, None])
+    return image
+  return tf.nest.map_structure(tf.stop_gradient, tf.map_fn(_map_fn, image_files, dtype=tf.uint8, parallel_iterations=32))
 
 @tf.function(experimental_compile=True)
 def batch_image_preprocess(raw_images,
-                           image_size: Union[int, Tuple[int, int]]):
+                           image_size: Union[int, Tuple[int, int]],
+                           batch_size: int = None):
   """Preprocess batched images for inference.
 
   Args:
@@ -115,22 +76,22 @@ def batch_image_preprocess(raw_images,
   Returns:
     (image, scale): a tuple of processed images and scales.
   """
-  # map_fn is a little bit slower due to some extra overhead.
-  def _image_preprocess(image):
-    input_processor = dataloader.DetectionInputProcessor(image, image_size)
-    input_processor.normalize_image()
-    return input_processor._image
+  if not batch_size:
+    # map_fn is a little bit slower due to some extra overhead.
+    map_fn = functools.partial(image_preprocess, image_size=image_size)
+    images, scales = tf.nest.map_structure(tf.stop_gradient, tf.map_fn(
+        map_fn, raw_images, dtype=(tf.float32, tf.float32)))
+    return (images, scales)
 
-  images = tf.nest.map_structure(tf.stop_gradient, tf.map_fn(
-      _image_preprocess, raw_images, dtype=tf.float32, parallel_iterations=32))
-  height = tf.cast(tf.shape(images)[1], tf.float32)
-  width = tf.cast(tf.shape(images)[2], tf.float32)
-  image_scale_y = image_size[0] / height
-  image_scale_x = image_size[1] / width
-  image_scales = tf.minimum(image_scale_x, image_scale_y)
-  images = tf.image.resize_image_with_pad(
-    images, image_size[0], image_size[1], align_corners=True)
-  return images, image_scales
+  # If batch size is known, use a simple loop.
+  scales, images = [], []
+  for i in range(batch_size):
+    image, scale = image_preprocess(raw_images[i], image_size)
+    scales.append(scale)
+    images.append(image)
+  images = tf.stack(images)
+  scales = tf.stack(scales)
+  return (images, scales)
 
 
 def build_inputs(image_path_pattern: Text, image_size: Union[int, Tuple[int,
@@ -193,12 +154,11 @@ def build_model(model_name: Text, inputs: tf.Tensor, **kwargs):
         box_outputs[i] = box_out_list[i - config.min_level]
       return cls_outputs, box_outputs
 
-    cls_outputs, box_outputs = utils.build_model_with_precision(
-        precision, model_arch, inputs, False, model_name, **kwargs)
   else:
     model_arch = det_model_fn.get_model_arch(model_name)
-    cls_outputs, box_outputs = utils.build_model_with_precision(
-        precision, model_arch, inputs, False, model_name, **kwargs)
+
+  cls_outputs, box_outputs = utils.build_model_with_precision(
+      precision, model_arch, inputs, False, model_name, **kwargs)
 
   if mixed_precision:
     # Post-processing has multiple places with hard-coded float32.
@@ -266,25 +226,33 @@ def det_post_process(params: Dict[Any, Any], cls_outputs: Dict[int, tf.Tensor],
     detections_batch: a batch of detection results. Each detection is a tensor
       with each row as [image_id, ymin, xmin, ymax, xmax, score, class].
   """
-  # batch_size = cls_outputs[params['min_level']].shape[0]
-  # if not batch_size:
-  #   # Use combined version for dynamic batch size.
-  #   nms_boxes, nms_scores, nms_classes, _ = cci_postprocess.postprocess_combined(
-  #       params, cls_outputs, box_outputs, scales)
-  # else:
-  nms_boxes, nms_scores, nms_classes = cci_postprocess.postprocess_global(
-      params, cls_outputs, box_outputs, scales)
-  nms_boxes = tf.identity(nms_boxes, name='boxes')
-  nms_scores = tf.identity(nms_scores, name='scores')
-  nms_classes = tf.identity(nms_classes, name='classes')
-  return nms_boxes, nms_scores, nms_classes
+  if params.get('combined_nms', None):
+    # Use combined version for dynamic batch size.
+    nms_boxes, nms_scores, nms_classes, _ = postprocess.postprocess_combined(
+        params, cls_outputs, box_outputs, scales)
+  else:
+    nms_boxes, nms_scores, nms_classes, _ = postprocess.postprocess_global(
+        params, cls_outputs, box_outputs, scales)
+  # return nms_boxes, nms_scores, nms_classes
+  batch_size = tf.shape(cls_outputs[params['min_level']])[0]
+  img_ids = tf.expand_dims(tf.range(0, tf.cast(batch_size, nms_scores.dtype), dtype=nms_scores.dtype), -1)
+  detections = [
+      img_ids * tf.ones_like(nms_scores),
+      nms_boxes[:, :, 0],
+      nms_boxes[:, :, 1],
+      nms_boxes[:, :, 2],
+      nms_boxes[:, :, 3],
+      nms_scores,
+      nms_classes,
+  ]
+  return tf.stack(detections, axis=-1, name='detections')
 
 
 def visualize_image(image,
                     boxes,
                     classes,
                     scores,
-                    id_mapping=None,
+                    label_map=None,
                     min_score_thresh=0.01,
                     max_boxes_to_draw=1000,
                     line_thickness=2,
@@ -306,8 +274,8 @@ def visualize_image(image,
   Returns:
     output_image: an output image with annotated boxes and classes.
   """
-  id_mapping = parse_label_id_mapping(id_mapping)
-  category_index = {k: {'id': k, 'name': id_mapping[k]} for k in id_mapping}
+  label_map = label_util.get_label_map(label_map or 'coco')
+  category_index = {k: {'id': k, 'name': label_map[k]} for k in label_map}
   img = np.array(image)
   vis_utils.visualize_boxes_and_labels_on_image_array(
       img,
@@ -322,43 +290,9 @@ def visualize_image(image,
   return img
 
 
-def parse_label_id_mapping(
-    label_id_mapping: Union[Text, Dict[int, Text]] = None) -> Dict[int, Text]:
-  """Parse label id mapping from a string or a yaml file.
-
-  The label_id_mapping is a dict that maps class id to its name, such as:
-
-    {
-      1: "person",
-      2: "dog"
-    }
-
-  Args:
-    label_id_mapping:
-
-  Returns:
-    A dictionary with key as integer id and value as a string of name.
-  """
-  if label_id_mapping is None:
-    return coco_id_mapping
-
-  if isinstance(label_id_mapping, dict):
-    label_id_dict = label_id_mapping
-  elif isinstance(label_id_mapping, str):
-    with tf.io.gfile.GFile(label_id_mapping) as f:
-      label_id_dict = yaml.load(f, Loader=yaml.FullLoader)
-  else:
-    raise TypeError('label_id_mapping must be a dict or a yaml filename, '
-                    'containing a mapping from class ids to class names.')
-
-  return label_id_dict
-
-
 def visualize_image_prediction(image,
-                               boxes,
-                               scores,
-                               classes,
-                               label_id_mapping=None,
+                               prediction,
+                               label_map=None,
                                **kwargs):
   """Viusalize detections on a given image.
 
@@ -366,20 +300,18 @@ def visualize_image_prediction(image,
     image: Image content in shape of [height, width, 3].
     prediction: a list of vector, with each vector has the format of [image_id,
       ymin, xmin, ymax, xmax, score, class].
-    label_id_mapping: a map from label id to name.
+    label_map: a map from label id to name.
     **kwargs: extra parameters for vistualization, such as min_score_thresh,
       max_boxes_to_draw, and line_thickness.
 
   Returns:
     a list of annotated images.
   """
-  # boxes = prediction[:, 0:4]
-  # classes = prediction[:, 5].astype(int)
-  # scores = prediction[:, 4]
-  label_id_mapping = label_id_mapping or coco_id_mapping
+  boxes = prediction[:, 1:5]
+  classes = prediction[:, 6].astype(int)
+  scores = prediction[:, 5]
 
-  return visualize_image(image, boxes, classes, scores, label_id_mapping,
-                         **kwargs)
+  return visualize_image(image, boxes, classes, scores, label_map, **kwargs)
 
 
 class ServingDriver(object):
@@ -461,8 +393,7 @@ class ServingDriver(object):
     if model_params:
       self.params.update(model_params)
     self.params.update(dict(is_training_bn=False))
-    self.label_id_mapping = parse_label_id_mapping(
-        self.params.get('label_id_mapping', None))
+    self.label_map = self.params.get('label_map', None)
 
     self.signitures = None
     self.sess = None
@@ -483,7 +414,7 @@ class ServingDriver(object):
           tf.OptimizerOptions.ON_2)
     return tf.Session(config=sess_config)
 
-  def build(self, params_override=None, from_base64=False):
+  def build(self, params_override=None):
     """Build model and restore checkpoints."""
     params = copy.deepcopy(self.params)
     if params_override:
@@ -492,37 +423,18 @@ class ServingDriver(object):
     if not self.sess:
       self.sess = self._build_session()
     with self.sess.graph.as_default():
-      if from_base64:
-        image_files = tf.placeholder(tf.string, name='image_files', shape=[None])
-        raw_images, image_scales = batch_image_files_decode(image_files, params['image_size'])
-        images = tf.identity(raw_images, name='image_arrays')
-        scales = tf.identity(image_scales, name='image_scales')
-      else:
-        image_files=None
-        raw_images = tf.placeholder(tf.uint8, name='image_arrays', shape=[None, None, None, 3])
-        images, scales = batch_image_preprocess(raw_images, params['image_size'])
+      image_files = tf.placeholder(tf.string, name='image_files', shape=[None])
+      raw_images = batch_image_files_decode(image_files)
+      raw_images = tf.identity(raw_images, name='image_arrays')
+      images, scales = batch_image_preprocess(raw_images, params['image_size'],
+                                              self.batch_size)
       if params['data_format'] == 'channels_first':
         images = tf.transpose(images, [0, 3, 1, 2])
-      class_outputs, box_outputs = build_model(self.model_name, images, **params)
-      nms_boxes, nms_scores, nms_classes = det_post_process(params, class_outputs, box_outputs, scales)
+      class_outputs, box_outputs = build_model(self.model_name, images,
+                                               **params)
+      params.update(dict(batch_size=self.batch_size))
+      detections = det_post_process(params, class_outputs, box_outputs, scales)
 
-      def _crop_images(data):
-        image, boxes = data
-
-        def _crop_image(data):
-          box = tf.cast(data, tf.int32)
-          crop_image = tf.image.crop_to_bounding_box(image, box[0], box[1], box[2] - box[0], box[3] - box[1])
-          return tf.image.encode_jpeg(crop_image, 'rgb', progressive=True, optimize_size=True)
-
-        encoded_crop_images = tf.nest.map_structure(
-          tf.stop_gradient,
-          tf.map_fn(_crop_image, (boxes), (tf.string), 32))
-        return encoded_crop_images
-
-      encoded_crop_images = tf.nest.map_structure(
-        tf.stop_gradient,
-        tf.map_fn(_crop_images, (raw_images, nms_boxes), (tf.string), 32))
-      encoded_crop_images = tf.identity(encoded_crop_images, 'crop_images')
       restore_ckpt(
           self.sess,
           self.ckpt_path,
@@ -532,20 +444,16 @@ class ServingDriver(object):
     self.signitures = {
         'image_files': image_files,
         'image_arrays': raw_images,
-        'image_scales': scales,
-        'boxes': nms_boxes,
-        'scores': nms_scores,
-        'classes': nms_classes,
-        'crop_images': encoded_crop_images
+        'prediction': detections,
     }
     return self.signitures
 
-  def visualize(self, image, boxes, scores, classes, **kwargs):
+  def visualize(self, image, prediction, **kwargs):
     """Visualize prediction on image."""
     return visualize_image_prediction(
         image,
-        boxes, scores, classes,
-        label_id_mapping=self.label_id_mapping,
+        prediction,
+        label_map=self.label_map,
         **kwargs)
 
   def serve_files(self, image_files: List[Text]):
@@ -560,26 +468,8 @@ class ServingDriver(object):
     if not self.sess:
       self.build()
     predictions = self.sess.run(
-        [self.signitures['boxes'], self.signitures['scores'], self.signitures['classes']],
+        self.signitures['prediction'],
         feed_dict={self.signitures['image_files']: image_files})
-    return predictions
-
-
-  def serve_images(self, image_arrays):
-    """Serve a list of image arrays.
-
-    Args:
-      image_arrays: A list of image content with each image has shape [height,
-        width, 3] and uint8 type.
-
-    Returns:
-      A list of detections.
-    """
-    if not self.sess:
-      self.build()
-    predictions = self.sess.run(
-        [self.signitures['boxes'], self.signitures['scores'], self.signitures['classes']],
-        feed_dict={self.signitures['image_arrays']: image_arrays})
     return predictions
 
   def benchmark(self, image_arrays, trace_filename=None):
@@ -594,13 +484,13 @@ class ServingDriver(object):
 
     # init session
     self.sess.run(
-        [self.signitures['boxes'], self.signitures['scores'], self.signitures['classes']],
+        self.signitures['prediction'],
         feed_dict={self.signitures['image_arrays']: image_arrays})
 
     start = time.perf_counter()
     for _ in range(10):
       self.sess.run(
-          [self.signitures['boxes'], self.signitures['scores'], self.signitures['classes']],
+          self.signitures['prediction'],
           feed_dict={self.signitures['image_arrays']: image_arrays})
     end = time.perf_counter()
     inference_time = (end - start) / 10
@@ -613,13 +503,30 @@ class ServingDriver(object):
       run_options.trace_level = tf.RunOptions.FULL_TRACE
       run_metadata = tf.RunMetadata()
       self.sess.run(
-          [self.signitures['boxes'], self.signitures['scores'], self.signitures['classes']],
+          self.signitures['prediction'],
           feed_dict={self.signitures['image_arrays']: image_arrays},
           options=run_options,
           run_metadata=run_metadata)
       with tf.io.gfile.GFile(trace_filename, 'w') as trace_file:
         trace = timeline.Timeline(step_stats=run_metadata.step_stats)
         trace_file.write(trace.generate_chrome_trace_format(show_memory=True))
+
+  def serve_images(self, image_arrays):
+    """Serve a list of image arrays.
+
+    Args:
+      image_arrays: A list of image content with each image has shape [height,
+        width, 3] and uint8 type.
+
+    Returns:
+      A list of detections.
+    """
+    if not self.sess:
+      self.build()
+    predictions = self.sess.run(
+        self.signitures['prediction'],
+        feed_dict={self.signitures['image_arrays']: image_arrays})
+    return predictions
 
   def load(self, saved_model_dir_or_frozen_graph: Text):
     """Load the model using saved model or a frozen graph."""
@@ -628,10 +535,7 @@ class ServingDriver(object):
     self.signitures = {
         'image_files': 'image_files:0',
         'image_arrays': 'image_arrays:0',
-        'image_scales': 'image_scales:0',
-        'boxes': 'boxes:0',
-        'scores': 'scores:0',
-        'classes': 'classes:0',
+        'prediction': 'detections:0',
     }
 
     # Load saved model if it is a folder.
@@ -647,7 +551,7 @@ class ServingDriver(object):
 
   def freeze(self):
     """Freeze the graph."""
-    output_names = [self.signitures['boxes'].op.name, self.signitures['scores'].op.name, self.signitures['classes'].op.name]
+    output_names = [self.signitures['prediction'].op.name]
     graphdef = tf.graph_util.convert_variables_to_constants(
         self.sess, self.sess.graph_def, output_names)
     return graphdef
@@ -668,9 +572,7 @@ class ServingDriver(object):
         'serving_default':
             tf.saved_model.predict_signature_def(
                 {signitures['image_arrays'].name: signitures['image_arrays']},
-                {signitures['boxes'].name: signitures['boxes'],
-                 signitures['scores'].name: signitures['scores'],
-                 signitures['classes'].name: signitures['classes']}),
+                {signitures['prediction'].name: signitures['prediction']}),
     }
     b = tf.saved_model.Builder(output_dir)
     b.add_meta_graph_and_variables(
@@ -684,7 +586,8 @@ class ServingDriver(object):
 
     # also save freeze pb file.
     graphdef = self.freeze()
-    pb_path = tf.io.write_graph(graphdef, output_dir, self.model_name + '_frozen.pb', as_text=False)
+    pb_path = os.path.join(output_dir, self.model_name + '_frozen.pb')
+    tf.io.gfile.GFile(pb_path, 'wb').write(graphdef.SerializeToString())
     logging.info('Frozen graph saved at %s', pb_path)
 
     if tflite_path:
@@ -743,8 +646,7 @@ class InferenceDriver(object):
     if model_params:
       self.params.update(model_params)
     self.params.update(dict(is_training_bn=False))
-    self.label_id_mapping = parse_label_id_mapping(
-        self.params.get('label_id_mapping', None))
+    self.label_map = self.params.get('label_map', None)
 
   def inference(self, image_path_pattern: Text, output_dir: Text, **kwargs):
     """Read and preprocess input images.
@@ -777,16 +679,16 @@ class InferenceDriver(object):
       # Build postprocessing.
       detections_batch = det_post_process(params, class_outputs, box_outputs,
                                           scales)
-      boxes, scores, classes = sess.run(detections_batch)
+      predictions = sess.run(detections_batch)
       # Visualize results.
-      for i, data in enumerate(zip(raw_images, boxes, scores, classes)):
-        raw_image, box, score, clazz = data
+      for i, prediction in enumerate(predictions):
         img = visualize_image_prediction(
-            raw_image, box, score, clazz,
-            label_id_mapping=self.label_id_mapping,
+            raw_images[i],
+            prediction,
+            label_map=self.label_map,
             **kwargs)
         output_image_path = os.path.join(output_dir, str(i) + '.jpg')
         Image.fromarray(img).save(output_image_path)
         logging.info('writing file to %s', output_image_path)
 
-      return boxes, scores, classes
+      return predictions
