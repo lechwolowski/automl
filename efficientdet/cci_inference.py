@@ -52,14 +52,14 @@ def image_preprocess(image, image_size: Union[int, Tuple[int, int]]):
   image_scale = input_processor.image_scale_to_original
   return image, image_scale
 
-
 @tf.function(experimental_compile=True)
 def batch_image_files_decode(image_files):
   def _map_fn(image_file):
     image = tf.io.decode_image(image_file)
     image.set_shape([None, None, None])
     return image
-  return tf.nest.map_structure(tf.stop_gradient, tf.map_fn(_map_fn, image_files, dtype=tf.uint8, parallel_iterations=32))
+  with tf.device("/cpu:0"):
+    return tf.nest.map_structure(tf.stop_gradient, tf.map_fn(_map_fn, image_files, dtype=tf.uint8, parallel_iterations=32))
 
 @tf.function(experimental_compile=True)
 def batch_image_preprocess(raw_images,
