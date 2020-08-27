@@ -197,7 +197,7 @@ def build_model_base(images, model_name, training, override_params=None):
   blocks_args, global_params = get_model_params(model_name, override_params)
 
   model = efficientnet_model.Model(blocks_args, global_params, model_name)
-  features = model(images, training=training, features_only=True)
-
+  outputs = model(images, training=training, features_only=True)
+  features, endpoints = outputs[0], outputs[1:]
   features = tf.identity(features, 'features')
-  return features, model.endpoints
+  return features, endpoints

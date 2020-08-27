@@ -24,9 +24,9 @@ import hparams_config
 import inference
 from keras import efficientdet_keras
 
-flags.DEFINE_string('image_path', None, 'Location of test image.')
-flags.DEFINE_string('output_dir', None, 'Directory of annotated output images.')
-flags.DEFINE_string('model_dir', None, 'Location of the checkpoint to run.')
+flags.DEFINE_string('image_path', '/media/fangsixie/data/automl/efficientdet/testdata/img1.jpg', 'Location of test image.')
+flags.DEFINE_string('output_dir', '/media/fangsixie/data/automl/efficientdet/testdata', 'Directory of annotated output images.')
+flags.DEFINE_string('model_dir', '/media/fangsixie/data/download/efficientdet-d0', 'Location of the checkpoint to run.')
 flags.DEFINE_string('model_name', 'efficientdet-d0', 'Model name to use.')
 flags.DEFINE_string('hparams', '', 'Comma separated k=v pairs or a yaml file')
 flags.DEFINE_bool('debug', False, 'If true, run function in eager for debug.')
@@ -44,7 +44,7 @@ def main(_):
   # Create model config.
   config = hparams_config.get_efficientdet_config('efficientdet-d0')
   config.is_training_bn = False
-  config.image_size = '1920x1280'
+  # config.image_size = '1920x1280'
   config.nms_configs.score_thresh = 0.4
   config.nms_configs.max_output_size = 100
   config.override(FLAGS.hparams)
@@ -58,14 +58,21 @@ def main(_):
   model = efficientdet_keras.EfficientDetModel(config=config)
   model.build((None, None, None, 3))
   model.load_weights(tf.train.latest_checkpoint(FLAGS.model_dir))
-  model.summary()
+  # model.summary()
 
-  @tf.function
-  def f(imgs):
-    return model(imgs, training=False, post_mode='global')
+  class ExportModel(tf.Module):
+    def __init__(self, model):
+      super().__init__()
+      self.model = model
 
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None, None, None, 3), dtype=tf.uint8)], autograph=False)
+    def f(self, imgs):
+      return self.model(imgs, training=False, post_mode='global')
+
+  export_model = ExportModel(model)
+  # tf.saved_model.save(export_model, './test_saved_model')
   imgs = tf.convert_to_tensor(imgs, dtype=tf.uint8)
-  boxes, scores, classes, valid_len = f(imgs)
+  boxes, scores, classes, valid_len = export_model.f(imgs)
 
   # Visualize results.
   for i, img in enumerate(imgs):
